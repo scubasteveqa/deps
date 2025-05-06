@@ -1,10 +1,13 @@
-# app.R
 library(shiny)
 library(reticulate)
 library(DT)
 
-# Configure Python path (adjust as needed)
-#use_python("/usr/local/bin/python3.12")
+# Initialize Python first
+tryCatch({
+  reticulate::py_discover_config()
+}, error = function(e) {
+  # Failed to initialize Python - app will handle this gracefully
+})
 
 # Function to get R packages and versions
 get_r_packages <- function() {
@@ -13,17 +16,52 @@ get_r_packages <- function() {
   return(pkgs)
 }
 
-# Function to get Python packages and versions
+# Function to get Python packages and versions - with error handling
 get_python_packages <- function() {
-  py_run_string("
-import pkg_resources
-packages = sorted([(p.key, p.version) for p in pkg_resources.working_set])
-  ")
-  py_packages <- py$packages
-  return(data.frame(
-    Package = sapply(py_packages, function(x) x[[1]]),
-    Version = sapply(py_packages, function(x) x[[2]])
-  ))
+  if (!py_available()) {
+    return(data.frame(Package = "Python not available", Version = "Error"))
+  }
+  
+  tryCatch({
+    py_run_string("
+try:
+    import pkg_resources
+    packages = sorted([(p.key, p.version) for p in pkg_resources.working_set])
+except:
+    # Fallback if pkg_resources doesn't work
+    import sys
+    import importlib.util
+    
+    def get_version(module_name):
+        try:
+            module = __import__(module_name)
+            return getattr(module, '__version__', 'Unknown')
+        except:
+            return 'Unknown'
+    
+    common_packages = ['numpy', 'pandas', 'matplotlib', 'scipy']
+    packages = [(pkg, get_version(pkg)) for pkg in common_packages]
+    ")
+    py_packages <- py$packages
+    return(data.frame(
+      Package = sapply(py_packages, function(x) x[[1]]),
+      Version = sapply(py_packages, function(x) x[[2]])
+    ))
+  }, error = function(e) {
+    return(data.frame(
+      Package = c("Error retrieving packages"),
+      Version = c(as.character(e))
+    ))
+  })
+}
+
+# Get Python version with error handling
+get_python_version <- function() {
+  tryCatch({
+    return(py_config()$version)
+  }, error = function(e) {
+    return("Python not available")
+  })
 }
 
 ui <- fluidPage(
@@ -35,7 +73,7 @@ ui <- fluidPage(
       DTOutput("r_packages")
     ),
     tabPanel("Python Packages",
-      h3(paste0("Python version: ", py_config()$version)),
+      h3(textOutput("python_version_text")),
       DTOutput("python_packages")
     ),
     tabPanel("System Info",
@@ -46,6 +84,11 @@ ui <- fluidPage(
 )
 
 server <- function(input, output) {
+  # Python version with error handling
+  output$python_version_text <- renderText({
+    paste0("Python version: ", get_python_version())
+  })
+  
   output$r_packages <- renderDT({
     get_r_packages()
   })
@@ -55,9 +98,17 @@ server <- function(input, output) {
   })
   
   output$system_info <- renderPrint({
+    r_info <- R.version
+    
+    py_info <- tryCatch({
+      py_config()
+    }, error = function(e) {
+      list(error = "Python not available", message = as.character(e))
+    })
+    
     list(
-      r_version = R.version,
-      python_config = py_config()
+      r_version = r_info,
+      python_config = py_info
     )
   })
 }
