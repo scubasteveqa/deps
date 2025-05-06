@@ -1,6 +1,5 @@
 library(shiny)
 library(reticulate)
-library(DT)
 
 # Initialize Python first
 tryCatch({
@@ -67,18 +66,18 @@ get_python_version <- function() {
 ui <- fluidPage(
   titlePanel("Installed Packages for R and Python"),
   
-  tabsetPanel(
-    tabPanel("R Packages", 
-      h3(paste0("R version: ", R.version$version.string)),
-      DTOutput("r_packages")
+  fluidRow(
+    column(6,
+      wellPanel(
+        h3(paste0("R version: ", R.version$version.string)),
+        uiOutput("r_packages_list")
+      )
     ),
-    tabPanel("Python Packages",
-      h3(textOutput("python_version_text")),
-      DTOutput("python_packages")
-    ),
-    tabPanel("System Info",
-      h3("System Information"),
-      verbatimTextOutput("system_info")
+    column(6,
+      wellPanel(
+        h3(textOutput("python_version_text")),
+        uiOutput("python_packages_list")
+      )
     )
   )
 )
@@ -89,26 +88,45 @@ server <- function(input, output) {
     paste0("Python version: ", get_python_version())
   })
   
-  output$r_packages <- renderDT({
-    get_r_packages()
-  })
-  
-  output$python_packages <- renderDT({
-    get_python_packages()
-  })
-  
-  output$system_info <- renderPrint({
-    r_info <- R.version
+  # Display R packages as a list
+  output$r_packages_list <- renderUI({
+    pkgs <- get_r_packages()
     
-    py_info <- tryCatch({
-      py_config()
-    }, error = function(e) {
-      list(error = "Python not available", message = as.character(e))
+    # Limit to 100 packages to avoid performance issues
+    if(nrow(pkgs) > 100) {
+      pkgs <- pkgs[1:100,]
+    }
+    
+    pkgs_html <- lapply(1:nrow(pkgs), function(i) {
+      p(HTML(paste0("<b>", pkgs$Package[i], "</b>: ", pkgs$Version[i])))
     })
     
-    list(
-      r_version = r_info,
-      python_config = py_info
+    tagList(
+      pkgs_html,
+      if(nrow(get_r_packages()) > 100) {
+        p("(Showing first 100 packages)")
+      }
+    )
+  })
+  
+  # Display Python packages as a list
+  output$python_packages_list <- renderUI({
+    pkgs <- get_python_packages()
+    
+    # Limit to 100 packages to avoid performance issues
+    if(nrow(pkgs) > 100) {
+      pkgs <- pkgs[1:100,]
+    }
+    
+    pkgs_html <- lapply(1:nrow(pkgs), function(i) {
+      p(HTML(paste0("<b>", pkgs$Package[i], "</b>: ", pkgs$Version[i])))
+    })
+    
+    tagList(
+      pkgs_html,
+      if(nrow(get_python_packages()) > 100) {
+        p("(Showing first 100 packages)")
+      }
     )
   })
 }
