@@ -3,13 +3,22 @@ library(bslib)
 library(reticulate)
 library(ggplot2)
 
-# Use a Python environment - fixed by using a more flexible approach
-# Instead of use_python_version() which requires a version parameter
-# Use try-catch to make the app more robust
-try({
-  # First try to use the default Python
-  use_python(Sys.which("python"), required = FALSE)
-}, silent = TRUE)
+# Configure Python for Posit Cloud environment
+# Try multiple approaches to ensure Python is available
+tryCatch({
+  # Try to initialize Python - more compatible with Posit Cloud
+  reticulate::py_discover_config()
+  
+  # Explicitly load numpy and pandas if available
+  tryCatch({
+    np <- reticulate::import("numpy", convert = FALSE)
+    pd <- reticulate::import("pandas", convert = FALSE)
+  }, error = function(e) {
+    # Packages might not be available, but Python might be
+  })
+}, error = function(e) {
+  # Failed to initialize Python - app will handle this gracefully
+})
 
 # Define UI for application
 ui <- page_sidebar(
@@ -33,6 +42,8 @@ ui <- page_sidebar(
   ),
   
   card(
+    card_header("Python Environment Status"),
+    verbatimTextOutput("pythonInfo"),
     card_header("Python Packages"),
     uiOutput("pyPackageList")
   )
@@ -40,21 +51,54 @@ ui <- page_sidebar(
 
 # Define server logic
 server <- function(input, output, session) {
+  # Display Python configuration info
+  output$pythonInfo <- renderPrint({
+    tryCatch({
+      python_info <- list(
+        "Python Available" = py_available(),
+        "Python Version" = py_version(),
+        "Python Path" = py_config()$python
+      )
+      str(python_info)
+    }, error = function(e) {
+      cat("Python environment unavailable\nError:", conditionMessage(e))
+    })
+  })
+  
   # Generate Python data
   py_data <- reactive({
+    if (!py_available()) {
+      return(data.frame(x = numeric(0), y = numeric(0)))
+    }
+    
     tryCatch({
-      py_run_string(paste0("
+      # Create Python data frame directly using reticulate
+      n <- input$points
+      
+      # Method 1: Try using imported modules
+      tryCatch({
+        np <- import("numpy", convert = FALSE)
+        pd <- import("pandas", convert = FALSE)
+        
+        x <- np$random$normal(0, 1, as.integer(n))
+        y <- x * 2 + np$random$normal(0, 1, as.integer(n))
+        data <- pd$DataFrame(list(x = x, y = y))
+        py_to_r(data)
+      }, error = function(e) {
+        # Method 2: Fall back to py_run_string if direct imports fail
+        py_run_string(paste0("
 import numpy as np
 import pandas as pd
 
 # Create random data
 np.random.seed(123)
-n = ", input$points, "
+n = ", n, "
 x = np.random.normal(0, 1, n)
 y = x * 2 + np.random.normal(0, 1, n)
 data = pd.DataFrame({'x': x, 'y': y})
-"))
-      py$data
+        "))
+        py$data
+      })
     }, error = function(e) {
       # Return an empty data frame if there's an error with Python
       data.frame(x = numeric(0), y = numeric(0))
@@ -79,7 +123,9 @@ data = pd.DataFrame({'x': x, 'y': y})
       } else {
         # Fallback plot if Python isn't available
         ggplot() + 
-          annotate("text", x = 0.5, y = 0.5, label = "Python data unavailable") +
+          annotate("text", x = 0.5, y = 0.5, 
+                  label = "Python data unavailable\nTry using a local R installation", 
+                  hjust = 0.5) +
           theme_minimal() +
           xlim(0, 1) + ylim(0, 1)
       }
@@ -109,32 +155,75 @@ data = pd.DataFrame({'x': x, 'y': y})
     )
   })
   
-  # Python Packages list
+  # Python Packages list - more robust implementation
   output$pyPackageList <- renderUI({
-    # Get Python package information
+    if (!py_available()) {
+      return(div(
+        p("Python is not available in this environment."),
+        p("To use Python features, try running this app locally with Python installed.")
+      ))
+    }
+    
+    # Get Python package information - more reliable method
     py_pkg_info <- tryCatch({
-      py_run_string("
-import pkg_resources
+      packages <- py_eval("
 import sys
+import importlib
 
-try:
-    packages = []
-    for package in pkg_resources.working_set:
-        packages.append((package.key, package.version))
+def get_package_version(package_name):
+    try:
+        return importlib.import_module(package_name).__version__
+    except (ImportError, AttributeError):
+        return 'Not installed'
 
-    # Filter packages if needed
-    if not show_all:
-        default_packages = ['numpy', 'pandas', 'matplotlib']
-        packages = [pkg for pkg in packages if pkg[0] in default_packages]
-except:
-    packages = [('python-error', 'Package information unavailable')]
-", local = list(show_all = input$showAllPackages))
+packages = []
+default_packages = ['numpy', 'pandas', 'matplotlib', 'scipy']
+
+if show_all:
+    # This is a safer way to get installed packages
+    import pip
+    try:
+        installed_packages = pip._internal.operations.freeze.freeze()
+        for pkg in installed_packages:
+            if '==' in pkg:
+                name, version = pkg.split('==', 1)
+                packages.append((name, version))
+    except:
+        # Fallback for when pip internals can't be accessed
+        for pkg in default_packages:
+            packages.append((pkg, get_package_version(pkg)))
+else:
+    for pkg in default_packages:
+        packages.append((pkg, get_package_version(pkg)))
+
+packages
+      ", list(show_all = input$showAllPackages))
+      
+      packages
     }, error = function(e) {
-      list(packages = list(c("python-error", "Python unavailable")))
+      # Simpler fallback that works in more environments
+      if (input$showAllPackages) {
+        list(
+          c("Python packages", "Could not retrieve full list"),
+          c("Error", conditionMessage(e))
+        )
+      } else {
+        # Try a more direct approach for just the default packages
+        default_pkgs <- c("numpy", "pandas", "matplotlib", "scipy")
+        pkg_list <- lapply(default_pkgs, function(pkg) {
+          version <- tryCatch({
+            py_eval(paste0("__import__('", pkg, "').__version__"))
+          }, error = function(e) {
+            "Not installed"
+          })
+          c(pkg, version)
+        })
+        pkg_list
+      }
     })
     
     # Convert Python packages to HTML elements
-    package_elements <- lapply(py_pkg_info$packages, function(pkg) {
+    package_elements <- lapply(py_pkg_info, function(pkg) {
       p(paste(pkg[[1]], pkg[[2]]))
     })
     
