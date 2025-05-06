@@ -3,11 +3,18 @@ library(bslib)
 library(reticulate)
 library(ggplot2)
 
-# Configure Python for Posit Cloud environment
-# Try multiple approaches to ensure Python is available
+# Configure Python for both Posit Cloud and Connect environments
 tryCatch({
-  # Try to initialize Python - more compatible with Posit Cloud
+  # Create a more robust Python configuration
+  # In Connect, this will use the pre-configured Python environment
   reticulate::py_discover_config()
+  
+  # Use a specific virtual environment if available (Connect will set this up from requirements.txt)
+  # This is a no-op if the environment doesn't exist
+  virtualenv_dir <- Sys.getenv("RETICULATE_PYTHON_ENV", unset = NA)
+  if (!is.na(virtualenv_dir) && dir.exists(virtualenv_dir)) {
+    use_virtualenv(virtualenv_dir)
+  }
   
   # Explicitly load numpy and pandas if available
   tryCatch({
@@ -54,10 +61,13 @@ server <- function(input, output, session) {
   # Display Python configuration info
   output$pythonInfo <- renderPrint({
     tryCatch({
+      # Get more detailed Python info to help debug Connect issues
       python_info <- list(
         "Python Available" = py_available(),
         "Python Version" = py_version(),
-        "Python Path" = py_config()$python
+        "Python Path" = py_config()$python,
+        "Python Environment" = Sys.getenv("RETICULATE_PYTHON_ENV", "Not set"),
+        "Python Modules Path" = py_eval("import sys; sys.path")
       )
       str(python_info)
     }, error = function(e) {
@@ -124,7 +134,7 @@ data = pd.DataFrame({'x': x, 'y': y})
         # Fallback plot if Python isn't available
         ggplot() + 
           annotate("text", x = 0.5, y = 0.5, 
-                  label = "Python data unavailable\nTry using a local R installation", 
+                  label = "Python data unavailable\nMake sure numpy and pandas are installed", 
                   hjust = 0.5) +
           theme_minimal() +
           xlim(0, 1) + ylim(0, 1)
@@ -155,71 +165,55 @@ data = pd.DataFrame({'x': x, 'y': y})
     )
   })
   
-  # Python Packages list - more robust implementation
+  # Python Packages list - Connect-friendly implementation
   output$pyPackageList <- renderUI({
     if (!py_available()) {
       return(div(
         p("Python is not available in this environment."),
-        p("To use Python features, try running this app locally with Python installed.")
+        p("Check that you've included a requirements.txt file if publishing to Connect.")
       ))
     }
     
-    # Get Python package information - more reliable method
+    # Get Python package information - more Connect-friendly
     py_pkg_info <- tryCatch({
-      packages <- py_eval("
+      # Use a simpler approach that's more likely to work in Connect
+      py_run_string("
 import sys
-import importlib
+import importlib.util
 
-def get_package_version(package_name):
-    try:
-        return importlib.import_module(package_name).__version__
-    except (ImportError, AttributeError):
+def check_package(package_name):
+    spec = importlib.util.find_spec(package_name)
+    if spec is None:
         return 'Not installed'
+    
+    try:
+        mod = importlib.import_module(package_name)
+        version = getattr(mod, '__version__', 'Unknown version')
+        return version
+    except:
+        return 'Installed (version unknown)'
 
-packages = []
 default_packages = ['numpy', 'pandas', 'matplotlib', 'scipy']
+package_info = []
+
+for pkg in default_packages:
+    package_info.append((pkg, check_package(pkg)))
 
 if show_all:
-    # This is a safer way to get installed packages
-    import pip
     try:
-        installed_packages = pip._internal.operations.freeze.freeze()
-        for pkg in installed_packages:
-            if '==' in pkg:
-                name, version = pkg.split('==', 1)
-                packages.append((name, version))
+        import pkg_resources
+        installed_packages = [(pkg.key, pkg.version) for pkg in pkg_resources.working_set]
+        package_info.extend([p for p in installed_packages if p[0] not in default_packages])
     except:
-        # Fallback for when pip internals can't be accessed
-        for pkg in default_packages:
-            packages.append((pkg, get_package_version(pkg)))
-else:
-    for pkg in default_packages:
-        packages.append((pkg, get_package_version(pkg)))
-
-packages
-      ", list(show_all = input$showAllPackages))
-      
-      packages
+        package_info.append(('Note', 'Unable to retrieve all packages'))
+")
+      py$package_info
     }, error = function(e) {
-      # Simpler fallback that works in more environments
-      if (input$showAllPackages) {
-        list(
-          c("Python packages", "Could not retrieve full list"),
-          c("Error", conditionMessage(e))
-        )
-      } else {
-        # Try a more direct approach for just the default packages
-        default_pkgs <- c("numpy", "pandas", "matplotlib", "scipy")
-        pkg_list <- lapply(default_pkgs, function(pkg) {
-          version <- tryCatch({
-            py_eval(paste0("__import__('", pkg, "').__version__"))
-          }, error = function(e) {
-            "Not installed"
-          })
-          c(pkg, version)
-        })
-        pkg_list
-      }
+      # Most basic fallback
+      default_pkgs <- c("numpy", "pandas", "matplotlib", "scipy")
+      lapply(default_pkgs, function(pkg) {
+        c(pkg, "Status check failed")
+      })
     })
     
     # Convert Python packages to HTML elements
