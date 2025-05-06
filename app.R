@@ -1,46 +1,45 @@
 library(shiny)
 library(bslib)
 library(reticulate)
-library(ggplot2)
 
-# Configure Python for both Posit Cloud and Connect environments
+# Configure Python environment, preferring Python 3.12
 tryCatch({
-  # Create a more robust Python configuration
-  # In Connect, this will use the pre-configured Python environment
-  reticulate::py_discover_config()
+  # Try to use Python 3.12 specifically
+  py_versions <- py_discover_config()
+  python_path <- NULL
   
-  # Use a specific virtual environment if available (Connect will set this up from requirements.txt)
-  # This is a no-op if the environment doesn't exist
-  virtualenv_dir <- Sys.getenv("RETICULATE_PYTHON_ENV", unset = NA)
-  if (!is.na(virtualenv_dir) && dir.exists(virtualenv_dir)) {
-    use_virtualenv(virtualenv_dir)
+  # Check if Python 3.12 is available
+  for (ver_path in py_versions$python_versions) {
+    tryCatch({
+      version_info <- system2(ver_path, "--version", stdout = TRUE)
+      if (grepl("3\\.12", version_info)) {
+        python_path <- ver_path
+        break
+      }
+    }, error = function(e) {
+      # Continue to the next path
+    })
   }
   
-  # Explicitly load numpy and pandas if available
-  tryCatch({
-    np <- reticulate::import("numpy", convert = FALSE)
-    pd <- reticulate::import("pandas", convert = FALSE)
-  }, error = function(e) {
-    # Packages might not be available, but Python might be
-  })
+  # If Python 3.12 found, use it
+  if (!is.null(python_path)) {
+    use_python(python_path, required = TRUE)
+  } else {
+    # Otherwise, use whatever Python is available
+    reticulate::py_discover_config()
+  }
 }, error = function(e) {
   # Failed to initialize Python - app will handle this gracefully
 })
 
 # Define UI for application
-ui <- page_sidebar(
-  title = "R & Python Integration Demo",
-  sidebar = sidebar(
-    selectInput("dataset", "Select Dataset:", 
-                choices = c("R Iris", "Python Generated Data")),
-    sliderInput("points", "Number of Data Points:", 
-                min = 50, max = 500, value = 200),
-    checkboxInput("showAllPackages", "Show all installed packages", FALSE)
-  ),
+ui <- page_fluid(
+  title = "R & Python Environment Explorer",
   
+  # Main content cards
   card(
-    card_header("Data Visualization"),
-    plotOutput("dataPlot")
+    card_header("Python Version (Target: Python 3.12)"),
+    verbatimTextOutput("python_version")
   ),
   
   card(
@@ -49,8 +48,6 @@ ui <- page_sidebar(
   ),
   
   card(
-    card_header("Python Environment Status"),
-    verbatimTextOutput("pythonInfo"),
     card_header("Python Packages"),
     uiOutput("pyPackageList")
   )
@@ -58,101 +55,34 @@ ui <- page_sidebar(
 
 # Define server logic
 server <- function(input, output, session) {
-  # Display Python configuration info
-  output$pythonInfo <- renderPrint({
+  # Display Python version information
+  output$python_version <- renderPrint({
     tryCatch({
-      # Get more detailed Python info to help debug Connect issues
-      python_info <- list(
-        "Python Available" = py_available(),
-        "Python Version" = py_version(),
-        "Python Path" = py_config()$python,
-        "Python Environment" = Sys.getenv("RETICULATE_PYTHON_ENV", "Not set"),
-        "Python Modules Path" = py_eval("import sys; sys.path")
-      )
-      str(python_info)
-    }, error = function(e) {
-      cat("Python environment unavailable\nError:", conditionMessage(e))
-    })
-  })
-  
-  # Generate Python data
-  py_data <- reactive({
-    if (!py_available()) {
-      return(data.frame(x = numeric(0), y = numeric(0)))
-    }
-    
-    tryCatch({
-      # Create Python data frame directly using reticulate
-      n <- input$points
+      python_version <- as.character(py_config()$version)
+      python_path <- as.character(py_config()$python)
+      cat("Python version:", python_version, "\n")
+      cat("Python path:", python_path, "\n")
+      cat("Python available:", py_available(), "\n")
       
-      # Method 1: Try using imported modules
-      tryCatch({
-        np <- import("numpy", convert = FALSE)
-        pd <- import("pandas", convert = FALSE)
-        
-        x <- np$random$normal(0, 1, as.integer(n))
-        y <- x * 2 + np$random$normal(0, 1, as.integer(n))
-        data <- pd$DataFrame(list(x = x, y = y))
-        py_to_r(data)
-      }, error = function(e) {
-        # Method 2: Fall back to py_run_string if direct imports fail
-        py_run_string(paste0("
-import numpy as np
-import pandas as pd
-
-# Create random data
-np.random.seed(123)
-n = ", n, "
-x = np.random.normal(0, 1, n)
-y = x * 2 + np.random.normal(0, 1, n)
-data = pd.DataFrame({'x': x, 'y': y})
-        "))
-        py$data
-      })
+      # Check if we have Python 3.12
+      is_3_12 <- grepl("^3\\.12", python_version)
+      if (is_3_12) {
+        cat("✓ Using Python 3.12 as requested\n")
+      } else {
+        cat("✗ Python 3.12 not found. Using", python_version, "instead\n")
+      }
     }, error = function(e) {
-      # Return an empty data frame if there's an error with Python
-      data.frame(x = numeric(0), y = numeric(0))
+      cat("Python is not available in this environment.\n")
+      cat("Error:", conditionMessage(e), "\n")
     })
   })
   
-  # Generate plot based on selected dataset
-  output$dataPlot <- renderPlot({
-    if(input$dataset == "R Iris") {
-      ggplot(iris, aes(x = Sepal.Length, y = Sepal.Width, color = Species)) +
-        geom_point(size = 3, alpha = 0.7) +
-        theme_minimal() +
-        labs(title = "Iris Dataset (R)")
-    } else {
-      data <- py_data()
-      if(nrow(data) > 0) {
-        ggplot(data, aes(x = x, y = y)) +
-          geom_point(color = "darkblue", alpha = 0.7) +
-          geom_smooth(method = "lm", color = "red") +
-          theme_minimal() +
-          labs(title = "Python Generated Data")
-      } else {
-        # Fallback plot if Python isn't available
-        ggplot() + 
-          annotate("text", x = 0.5, y = 0.5, 
-                  label = "Python data unavailable\nMake sure numpy and pandas are installed", 
-                  hjust = 0.5) +
-          theme_minimal() +
-          xlim(0, 1) + ylim(0, 1)
-      }
-    }
-  })
-  
-  # R Packages list
+  # R Packages list - shows key packages
   output$rPackageList <- renderUI({
-    if (input$showAllPackages) {
-      # Show all installed R packages
-      installed_pkgs <- installed.packages()[, c("Package", "Version")]
-    } else {
-      # Show only specific R packages
-      default_packages <- c("shiny", "reticulate", "ggplot2", "bslib")
-      all_pkgs <- installed.packages()
-      installed_pkgs <- all_pkgs[all_pkgs[, "Package"] %in% default_packages, c("Package", "Version")]
-    }
+    # Show key R packages
+    default_packages <- c("shiny", "reticulate", "bslib")
+    all_pkgs <- installed.packages()
+    installed_pkgs <- all_pkgs[all_pkgs[, "Package"] %in% default_packages, c("Package", "Version")]
     
     # Convert to list of HTML elements
     package_lines <- apply(installed_pkgs, 1, function(row) {
@@ -165,7 +95,7 @@ data = pd.DataFrame({'x': x, 'y': y})
     )
   })
   
-  # Python Packages list - Connect-friendly implementation
+  # Python Packages list
   output$pyPackageList <- renderUI({
     if (!py_available()) {
       return(div(
@@ -174,9 +104,8 @@ data = pd.DataFrame({'x': x, 'y': y})
       ))
     }
     
-    # Get Python package information - more Connect-friendly
+    # Get Python package information
     py_pkg_info <- tryCatch({
-      # Use a simpler approach that's more likely to work in Connect
       py_run_string("
 import sys
 import importlib.util
@@ -193,24 +122,16 @@ def check_package(package_name):
     except:
         return 'Installed (version unknown)'
 
-default_packages = ['numpy', 'pandas', 'matplotlib', 'scipy']
+default_packages = ['numpy', 'pandas', 'matplotlib']
 package_info = []
 
 for pkg in default_packages:
     package_info.append((pkg, check_package(pkg)))
-
-if show_all:
-    try:
-        import pkg_resources
-        installed_packages = [(pkg.key, pkg.version) for pkg in pkg_resources.working_set]
-        package_info.extend([p for p in installed_packages if p[0] not in default_packages])
-    except:
-        package_info.append(('Note', 'Unable to retrieve all packages'))
 ")
       py$package_info
     }, error = function(e) {
       # Most basic fallback
-      default_pkgs <- c("numpy", "pandas", "matplotlib", "scipy")
+      default_pkgs <- c("numpy", "pandas", "matplotlib")
       lapply(default_pkgs, function(pkg) {
         c(pkg, "Status check failed")
       })
